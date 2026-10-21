@@ -7,7 +7,7 @@ const { MongoClient } = require("mongodb");
 const { GoogleGenAI } = require("@google/genai");
 
 const PORT = process.env.PORT || 3000;
-const CHAT_MODEL = process.env.CHAT_MODEL || "gemini-3.8-flash";
+const CHAT_MODEL = process.env.CHAT_MODEL || "gemini-3.5-flash-lite";
 const EMBED_MODEL = "gemini-embedding-001";
 const DIMS = 768;
 // const TOP_K = 4;
