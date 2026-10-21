@@ -13,7 +13,7 @@ const DIMS = 768;
 // const TOP_K = 4;
 const MIN_SCORE = Number(process.env.MIN_SCORE ?? 0.6);
 
-const ai = new GoogleGenAI({ apiKey: 'AQ.Ab8RN6Lb-VHtbJpWk97jdrogY9EU7-57Na89lxo-8XJ_7PEwMw' });
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const mongo = new MongoClient('mongodb+srv://snips:test@cluster0.hscsw.mongodb.net/myFirstDatabase?retryWrites=true&w=majority');
 let col;
 
