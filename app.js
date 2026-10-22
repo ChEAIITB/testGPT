@@ -3,6 +3,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+   const { stripLatex } = require("./scriptLatex");
 const { MongoClient } = require("mongodb");
 const { GoogleGenAI } = require("@google/genai");
 
@@ -282,7 +283,7 @@ const all = await retrieve(vector, docs);    console.log("scores:", all.map((h) 
 
     const hits = all.filter((h) => h.score >= MIN_SCORE);
     if (!hits.length) {
-      return res.json({ answer: "I couldn't find that in the handbook.", sources: [] });
+      return res.json({ answer: stripLatex(out.text), sources });
     }
 
     const out = await ai.models.generateContent({
