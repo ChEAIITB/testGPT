@@ -314,9 +314,3 @@ const sources = hits
   app.listen(PORT, () => console.log(`GRGPT on http://localhost:${PORT} (chat model: ${CHAT_MODEL})`));
 })();
 
-app.js: self-contained GRGPT server (no gpt.js needed).
-Needs: express, cors, mongodb, @google/genai, dotenv (already in package.json) + ./scriptLatex.js
-
-app.js: self-contained GRGPT server (no gpt.js needed).
-Needs: express, cors, mongodb, @google/genai, dotenv (already in package.json) + ./scriptLatex.js
-
