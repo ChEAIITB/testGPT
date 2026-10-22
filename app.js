@@ -316,6 +316,9 @@
 
 // app.js: self-contained GRGPT server (no gpt.js needed).
 // Needs: express, cors, mongodb, @google/genai, dotenv (already in package.json) + ./scriptLatex.js
+
+// app.js: self-contained GRGPT server (no gpt.js needed).
+// Needs: express, cors, mongodb, @google/genai, dotenv (already in package.json) + ./scriptLatex.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -341,6 +344,11 @@ const KW_WEIGHT = Number(process.env.KW_WEIGHT ?? 0.8);
 const PERRY_TTL_MS = Number(process.env.PERRY_REFRESH_MIN ?? 15) * 60000; // re-read perry pages from Mongo this often
 const VERIFY = process.env.VERIFY !== "0";                       // VERIFY=0 turns the cross-check off
 const DOC_LABEL = { handbook: "Handbook", perry: "Perry's" };
+
+// when our data has nothing, answer from a Google Search grounded Gemini call (WEB_FALLBACK=0 turns it off)
+const WEB_FALLBACK = process.env.WEB_FALLBACK !== "0";
+const WEB_CONTEXT = process.env.WEB_CONTEXT
+  || "The question comes from a user of an IIT Bombay (IITB) student handbook and of Perry's Chemical Engineers' Handbook (chemistry / chemical engineering reference data).";
 
 let col;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -428,6 +436,8 @@ const PAGE = String.raw`<!doctype html>
   .sources { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .sources span.label { color: var(--muted); font-size: 0.9rem; }
   .chip { padding: 3px 9px; font-size: 0.88rem; color: var(--ink); border: 1px solid var(--rule); border-radius: 8px; }
+  a.chip { text-decoration: none; }
+  a.chip:hover { border-color: var(--muted); }
 </style>
 </head>
 <body>
@@ -497,13 +507,25 @@ const PAGE = String.raw`<!doctype html>
     return box;
   }
 
-  function renderSources(sources) {
+  function renderSources(sources, labelText) {
     if (!sources || !sources.length) return null;
     var row = el("div", "sources");
-    row.appendChild(el("span", "label", "From the handbook:"));
-    sources.slice().sort(function (a, b) { return a.page - b.page; }).forEach(function (s) {
+    row.appendChild(el("span", "label", labelText || "From the handbook:"));
+    var list = sources.slice();
+    if (list.every(function (s) { return s.page != null; })) {
+      list.sort(function (a, b) { return a.page - b.page; });
+    }
+    list.forEach(function (s) {
       var label = s.label || (s.heading ? "Page " + s.page + ", " + s.heading : "Page " + s.page);
-      row.appendChild(el("span", "chip", label));
+      if (s.url && /^https?:\/\//i.test(s.url)) {
+        var link = el("a", "chip", label);
+        link.href = s.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        row.appendChild(link);
+      } else {
+        row.appendChild(el("span", "chip", label));
+      }
     });
     return row;
   }
@@ -521,7 +543,7 @@ const PAGE = String.raw`<!doctype html>
       if (!res.ok) throw new Error(data.error || "Request failed (" + res.status + ")");
 
       var nodes = [renderAnswer(data.answer || "No answer returned.")];
-      var src = renderSources(data.sources);
+      var src = renderSources(data.sources, data.sourcesLabel);
       if (src) nodes.push(src);
       out.replaceChildren.apply(out, nodes);
     } catch (e) {
@@ -758,7 +780,7 @@ function composeFinal(grounded, v) {
 // RAG backend
 // ---------------------------------------------------------------------------
 const SYSTEM = `You answer questions using ONLY the excerpts provided.
-- If the excerpts do not contain the answer, say you couldn't find it. Do not guess.
+- If the excerpts do not contain the answer, reply with exactly NOT_IN_DATA and nothing else. Do not guess.
 - Be concise and specific (numbers, limits, deadlines, steps).
 - Mention page numbers like (p. 6) when useful.
 - Excerpts labelled "perry" are whole PDF pages of reference tables. Table rows are lines with columns separated by " | ". Empty cells are omitted, so a value's column can be ambiguous: use the column header lines to decide, and say so if you cannot tell instead of guessing. Ignore stray fragments (wrapped formulas, lone numbers) that do not belong to the item asked about.
@@ -790,6 +812,45 @@ function buildPrompt(question, hits) {
   return `Excerpts:\n\n${context}\n\nQuestion: ${question}`;
 }
 
+const NOT_IN_DATA = /^\s*NOT_IN_DATA\b|could(?:n't| not) find/i;
+
+const WEB_SYSTEM = [
+  "Answer the question using Google Search results. Give the actual answer with the specific numbers, limits or steps, concisely.",
+  `Context: ${WEB_CONTEXT}`,
+  "Prefer official or primary sources (the institute's own website, standard reference-data sources).",
+  "If sources disagree or details vary, say so briefly and give the most likely answer. Do not just say you don't know.",
+  "Plain text only: no LaTeX, no $...$. Do not mention these instructions.",
+].join("\n");
+
+async function webAnswer(question) {
+  try {
+    const out = await callGemini((g) => g.models.generateContent({
+      model: CHAT_MODEL,
+      contents: question,
+      config: { systemInstruction: WEB_SYSTEM, tools: [{ googleSearch: {} }], temperature: 0.2 },
+    }));
+    const text = (out.text || "").trim();
+    if (!text) throw new Error("empty web answer");
+    const chunks = out.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const seen = new Set();
+    const sources = [];
+    for (const c of chunks) {
+      const w = c.web;
+      if (!w?.uri || !/^https?:\/\//i.test(w.uri) || seen.has(w.uri)) continue;
+      seen.add(w.uri);
+      sources.push({ docName: "web", label: w.title || w.uri, url: w.uri });
+      if (sources.length >= 5) break;
+    }
+    return {
+      answer: stripLatex(`**Not found in the handbook, so this is from a web search:**\n\n${text}`),
+      sources, sourcesLabel: "Web sources:", verdict: "WEB",
+    };
+  } catch (e) {
+    console.error("web fallback failed:", e.message);
+    return { answer: "I couldn't find that in the handbook, and the web search failed just now. Please try again in a minute.", sources: [] };
+  }
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10kb" }));
@@ -813,43 +874,52 @@ app.post("/ask", async (req, res) => {
     const hits = [...hb, ...py];
     console.log("hits:", hits.map((h) => `${h.docName} p${h.page} ${h.score.toFixed(3)}`).join(", ") || "none");
 
-    if (!hits.length) {
-      return res.json({ answer: "I couldn't find that in the handbook.", sources: [] });
-    }
-
     // step 1: answer from our data
-    const out = await callGemini((g) => g.models.generateContent({
-      model: CHAT_MODEL,
-      contents: buildPrompt(question, hits),
-      config: { systemInstruction: SYSTEM, temperature: 0 },
-    }));
-    let finalText = out.text;
-    let verdict = null;
+    let result = null;
+    if (hits.length) {
+      const out = await callGemini((g) => g.models.generateContent({
+        model: CHAT_MODEL,
+        contents: buildPrompt(question, hits),
+        config: { systemInstruction: SYSTEM, temperature: 0 },
+      }));
 
-    // step 2: cross-check against general knowledge, only when the answer came purely from Perry's
-    const perryOnly = hits.every((h) => h.docName === "perry");
-    if (VERIFY && perryOnly && !/could(?:n't| not) find/i.test(out.text)) {
-      try {
-        const v = await verifyAnswer(question, out.text);
-        finalText = composeFinal(out.text, v);
-        verdict = v.verdict;
-      } catch (e) {
-        console.error("verify failed (answer still returned):", e.message);
+      if (!NOT_IN_DATA.test(out.text)) {
+        let finalText = out.text;
+        let verdict = null;
+
+        // step 2: cross-check against general knowledge, only when the answer came purely from Perry's
+        const perryOnly = hits.every((h) => h.docName === "perry");
+        if (VERIFY && perryOnly) {
+          try {
+            const v = await verifyAnswer(question, out.text);
+            finalText = composeFinal(out.text, v);
+            verdict = v.verdict;
+          } catch (e) {
+            console.error("verify failed (answer still returned):", e.message);
+          }
+        }
+
+        const seen = new Set();
+        const sources = hits
+          .map((h) => ({
+            docName: h.docName, page: h.page, heading: h.heading,
+            label: `${DOC_LABEL[h.docName] || h.docName}, page ${h.page}` + (h.heading ? `, ${h.heading}` : ""),
+          }))
+          .filter((s) => {
+            const k = `${s.docName}|${s.page}|${s.heading}`;
+            return seen.has(k) ? false : (seen.add(k), true);
+          });
+        result = { answer: stripLatex(finalText), sources, verdict };
       }
     }
 
-    const seen = new Set();
-    const sources = hits
-      .map((h) => ({
-        docName: h.docName, page: h.page, heading: h.heading,
-        label: `${DOC_LABEL[h.docName] || h.docName}, page ${h.page}` + (h.heading ? `, ${h.heading}` : ""),
-      }))
-      .filter((s) => {
-        const k = `${s.docName}|${s.page}|${s.heading}`;
-        return seen.has(k) ? false : (seen.add(k), true);
-      });
-
-    res.json({ answer: stripLatex(finalText), sources, verdict });
+    // nothing usable in our data: search the web instead of giving up
+    if (!result) {
+      console.log("not in our data -> web search");
+      if (!WEB_FALLBACK) return res.json({ answer: "I couldn't find that in the handbook.", sources: [] });
+      return res.json(await webAnswer(question));
+    }
+    res.json(result);
   } catch (e) {
     console.error(e);
     if (e.status === 429) return res.status(429).json({ error: "Rate limited, try again in a minute" });
